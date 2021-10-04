@@ -3,6 +3,7 @@
 # vim: ai ts=4 sts=4 et sw=4 nu
 
 import io
+import os
 import shutil
 import base64
 import zipfile
@@ -10,6 +11,7 @@ import datetime
 import tempfile
 import threading
 import hashlib
+import json
 from pathlib import Path
 import concurrent.futures as cf
 
@@ -174,11 +176,12 @@ class Kolibri2Zim:
 
         if handler:
             # add thumbnail to zim if there's one for this node
-            thumbnail = self.db.get_node_thumbnail(node_id)
-            if thumbnail:
-                self.funnel_file(thumbnail["id"], thumbnail["ext"])
+            # thumbnail = self.db.get_node_thumbnail(node_id)
+            # if thumbnail:
+            #     self.funnel_file(thumbnail["id"], thumbnail["ext"])
             # fire the add_{kind}_node() method which will actually process it
-            handler(node_id)
+            if(kind == 'exercise'):
+                handler(node_id)
 
     def funnel_file(self, fid, fext):
         """ directly add a Kolibri file to the ZIM using same name """
@@ -497,7 +500,56 @@ class Kolibri2Zim:
 
         we'd solely add the perseus file in the ZIM along with the perseus reader from
         https://github.com/Khan/perseus"""
-        logger.warning(f"[NOT SUPPORTED] not adding exercice node {node_id}")
+
+        PERSEUS_TEST_PATH = '/src/kolibri2zim/templates'
+        PERSEUS_TEST_PATH_REPL = ''
+        FAIL = '\033[91m'
+
+        files = self.db.get_node_files(node_id, thumbnail=False)
+        files = sorted(files, key=lambda f: f["prio"])
+        it = filter(lambda f: f["supp"] == 0, files)
+
+        perseus_file = next(it)
+        perseus_url, perseus_name = get_kolibri_url_for(perseus_file['id'], perseus_file['ext'])
+        perseus_data = io.BytesIO()
+        stream_file(url=perseus_url, byte_stream=perseus_data)
+        # stream_file(url=perseus_url, fpath=PERSEUS_TEST_PATH)
+
+        zip_ark = zipfile.ZipFile(perseus_data)
+        logger.warn(f"{FAIL}{perseus_name}")
+
+        # if 'exercise.json' in zip_ark.namelist()
+        for ark_member in zip_ark.namelist():
+            zip_ark.extract(ark_member, f'{PERSEUS_TEST_PATH}/{perseus_file["id"]}')
+            if ark_member == 'exercise.json':
+                exercise_content = json.loads(zip_ark.open(ark_member).read())
+                assessment_items_content = []
+                assessment_items_count = len(exercise_content['all_assessment_items'])
+                if exercise_content.get('all_assessment_items', None):
+                    for assessment_item in exercise_content['all_assessment_items']:
+                        # what if json is not present?
+                        perseus_content = zip_ark.open(f'{assessment_item}.json').read().decode('utf-8')
+                        perseus_content = perseus_content.replace(
+                            r'web+graphie:${☣ LOCALPATH}',
+                            # f'web+graphie://{PERSEUS_TEST_PATH_REPL}/{perseus_file["id"]}'
+                            f'web+graphie:{perseus_file["id"]}'
+                        )
+                        perseus_content = perseus_content.replace(
+                            r'${☣ LOCALPATH}',
+                            f'{PERSEUS_TEST_PATH_REPL}/{perseus_file["id"]}'
+                        )
+                        assessment_items_content.append(perseus_content)
+
+                    assessment_items_content_str = '[' + ', '.join(assessment_items_content) + ']'
+                    html = self.jinja2_env.get_template("perseus_exercise.html").render(
+                        perseus_content = assessment_items_content_str,
+                        questions_count = str(assessment_items_count)
+                    )
+                    fullPath = os.path.join(PERSEUS_TEST_PATH, f'{perseus_file["id"]}.html')
+                    html_file = open(fullPath, 'w')
+                    html_file.write(html)
+                    html_file.close()
+                        
 
     def add_document_node(self, node_id):
         """Add content from this `document` node to zim
@@ -683,7 +735,7 @@ class Kolibri2Zim:
         succeeded = False
         try:
             self.add_favicon()
-            self.add_custom_about_and_css()
+            # self.add_custom_about_and_css()
 
             # add static files
             logger.info("Adding local files (assets)")
